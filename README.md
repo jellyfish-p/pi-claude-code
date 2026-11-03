@@ -94,19 +94,20 @@ node scripts/build-docs.mjs
 
 仓库远端正指向 [jellyfish-p/pi-claude-code](https://github.com/jellyfish-p/pi-claude-code)。
 
-`.github/workflows/package.yml` 会在以下场景运行：
+`.github/workflows/package.yml` 使用 Node 22。
 
-- push 到 `master` / `main`
-- pull request
-- 手动 `workflow_dispatch`
-- push `v*.*.*` tag（例如 `v0.1.0`）
+触发与行为：
 
-流程：
+- push 到 `master` / `main`、pull request、手动 `workflow_dispatch`：只跑 `npm test`，不打包
+- push `v*.*.*` tag（例如 `v0.1.0`）：跑测试、打包并创建 GitHub Release
 
-1. `npm test`
-2. `npm pack` 生成 `pi-claude-native-tools-<version>.tgz`
-3. 上传到 Actions artifact
-4. 如果触发的是 `v*.*.*` tag，再把 tarball 附加到对应的 GitHub Release（会先校验 tag 与 `package.json` 的 version 一致）
+tag 流程：
+
+1. 校验 tag 与 `package.json` 的 `version` 一致
+2. `npm test`
+3. `npm pack` 生成 `pi-claude-native-tools-<version>.tgz`
+4. 上传到 Actions artifact
+5. 把 tarball 附加到对应的 GitHub Release
 
 `package.json` 目前仍是 `private: true`，所以只做 GitHub 侧打包/Release，没有配置 `npm publish`。
 npmjs 发布暂时手动处理；以后要自动化时，需要去掉 `private`、添加 `NPM_TOKEN` secret，并补一个发布 workflow。
