@@ -1,0 +1,99 @@
+{
+  "model": "claude-opus-5-5",
+  "metadata": {
+    "user_id": "{\"device_id\":\"e2a011fe774bac40eccec616ac7b311119ada311f7142882d9445a176fe1d0a9\",\"account_uuid\":\"\",\"session_id\":\"ef96c476-8b6e-4ace-befc-9248e2f388bb\"}"
+  },
+  "max_tokens": 128000,
+  "thinking": {
+    "type": "adaptive",
+    "display": "updates"
+  },
+  "context_management": {
+    "edits": [
+      {
+        "type": "clear_thinking_20251015",
+        "keep": "all"
+      }
+    ]
+  },
+  "safeguards": [
+    {
+      "type": "dangerous_tool_use",
+      "classifier_context": {
+        "v": 1,
+        "permission_mode": "plan",
+        "platform": "windows",
+        "live_cwd": "/c/Users/36026/Documents/Github/pi-claude-code/.work/scratch",
+        "home_dir": "/c/Users/36026/Documents/Github/pi-claude-code/.work/home",
+        "rule_roots": {
+          "userSettings": "/c/Users/36026/Documents/Github/pi-claude-code/.work/home/.claude",
+          "projectSettings": "/c/Users/36026/Documents/Github/pi-claude-code/.work/scratch",
+          "localSettings": "/c/Users/36026/Documents/Github/pi-claude-code/.work/scratch",
+          "flagSettings": "/c/Users/36026/Documents/Github/pi-claude-code/.work/scratch",
+          "policySettings": "/c/Users/36026/Documents/Github/pi-claude-code/.work/scratch",
+          "cliArg": "/c/Users/36026/Documents/Github/pi-claude-code/.work/scratch",
+          "command": "/c/Users/36026/Documents/Github/pi-claude-code/.work/scratch",
+          "session": "/c/Users/36026/Documents/Github/pi-claude-code/.work/scratch",
+          "toolsNarrowing": "/c/Users/36026/Documents/Github/pi-claude-code/.work/scratch",
+          "mcpServerPolicy": "/c/Users/36026/Documents/Github/pi-claude-code/.work/scratch",
+          "hostCredential": "/c/Users/36026/Documents/Github/pi-claude-code/.work/scratch"
+        },
+        "trusted_directories": {
+          "primary": {
+            "path": "/c/Users/36026/Documents/Github/pi-claude-code/.work/scratch",
+            "resolved": [
+              "/c/Users/36026/Documents/Github/pi-claude-code/.work/scratch"
+            ]
+          },
+          "additional": [
+            {
+              "path": "/c/Users/36026/Documents/Github/pi-claude-code/.work/scratch",
+              "resolved": [
+                "/c/Users/36026/Documents/Github/pi-claude-code/.work/scratch",
+                "/c/Users/36026/Documents/Github/pi-claude-code/.work/scratch"
+              ],
+              "source": "session"
+            }
+          ],
+          "network": [],
+          "block_reads_outside_working_directories": false
+        },
+        "rules": {
+          "allow": [],
+          "deny": [],
+          "ask": []
+        },
+        "auto_mode": {
+          "allow": [],
+          "soft_deny": [],
+          "hard_deny": [],
+          "environment": []
+        },
+        "artifact_consent_holdback": false,
+        "case_insensitive_paths": true,
+        "restricted": false,
+        "is_remote_mode": false,
+        "classify_all_shell": false,
+        "user_identity": "36026",
+        "git_state": {
+          "cwd": "/c/Users/36026/Documents/Github/pi-claude-code/.work/scratch",
+          "root": null,
+          "branch": null,
+          "default_branch": null,
+          "status": null,
+          "visibility": {
+            "origin": null,
+            "push_remote": null,
+            "remotes": [],
+            "visibility_cache": []
+          },
+          "error": "not_a_repo"
+        }
+      }
+    }
+  ],
+  "output_config": {
+    "effort": "medium"
+  },
+  "stream": true
+}

@@ -1,0 +1,7 @@
+# 抓包工作区（二进制、临时 HOME、scratch）
+.work/
+node_modules/
+*.tgz
+
+# 本地 npm pack 输出
+dist/
