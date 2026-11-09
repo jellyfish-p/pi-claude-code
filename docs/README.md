@@ -32,9 +32,12 @@ mock /v1/messages  ──►  抓下完整 body（system / tools / messages）
 | [07-inventory.md](07-inventory.md) | SDK `init` 消息：24 个工具、53 个 skill、全部斜杠命令、capabilities |
 | [08-gated-tools.md](08-gated-tools.md) | 没被启用的内置工具（TodoWrite 等）+ TodoWrite 提示词原文 |
 | [09-pi-compat-notes.md](09-pi-compat-notes.md) | **落到 pi 的具体改法**：工具映射、提示词怎么拼、哪些地方别自作聪明 |
+| [npm-publishing.md](npm-publishing.md) | npm 包内容、GitHub Actions 发布和 Trusted Publisher 配置 |
 | [research/](research/) | 专题研究与实施计划（如 Claude 模型的原生工具格式） |
 | [skills/](skills/) | 12 个内置 skill 的逐字正文 |
 | [data/](data/) | 机器可读原件（tools.json / init.json / system-prompt.json …） |
+
+项目使用相关的入口说明见根目录 [README.md](../README.md)。
 
 ---
 
