@@ -64,6 +64,12 @@ pi -e ./extensions/claude-native-tools/index.ts
 npm test
 ```
 
+发布到 npm 后，可以直接安装：
+
+```bash
+pi install npm:pi-claude-native-tools
+```
+
 实现细节与限制见 [extensions/claude-native-tools/README.md](extensions/claude-native-tools/README.md)。
 
 ## 五个最有价值的发现
@@ -90,27 +96,47 @@ node scripts/build-docs.mjs
 
 换 Claude Code 版本要重抓，步骤见 [scripts/capture/README.md](scripts/capture/README.md)。
 
-## GitHub Actions 打包
+## GitHub Actions 打包与 npm 发布
 
 仓库远端正指向 [jellyfish-p/pi-claude-code](https://github.com/jellyfish-p/pi-claude-code)。
 
-`.github/workflows/package.yml` 使用 Node 22。
+`.github/workflows/package.yml` 的打包 job 使用 Node 22；npm 发布 job 使用 Node 24（保证 npm OIDC
+支持），并把测试通过的同一个 tarball 发布到 npm。
 
 触发与行为：
 
-- push 到 `master` / `main`、pull request、手动 `workflow_dispatch`：只跑 `npm test`，不打包
-- push `v*.*.*` tag（例如 `v0.1.0`）：跑测试、打包并创建 GitHub Release
+- push 到 `master` / `main`、pull request、手动 `workflow_dispatch`：跑 `npm test` 并生成可审计的 package artifact，不发布
+- push `v*.*.*` tag（例如 `v0.1.0`）：跑测试、打包、发布 npm，并创建 GitHub Release
 
 tag 流程：
 
 1. 校验 tag 与 `package.json` 的 `version` 一致
 2. `npm test`
-3. `npm pack` 生成 `pi-claude-native-tools-<version>.tgz`
+3. `npm pack` 生成 `pi-claude-native-tools-<version>.tgz`，同时记录 SHA-256 / SHA-512
 4. 上传到 Actions artifact
-5. 把 tarball 附加到对应的 GitHub Release
+5. npm job 下载并校验这个 tarball，然后用 npm OIDC + provenance 发布到 `latest`
+6. GitHub Release 附加同一个 tarball、校验和与构建清单
 
-`package.json` 目前仍是 `private: true`，所以只做 GitHub 侧打包/Release，没有配置 `npm publish`。
-npmjs 发布暂时手动处理；以后要自动化时，需要去掉 `private`、添加 `NPM_TOKEN` secret，并补一个发布 workflow。
+发布 job 只接受版本 tag，并且会检查 tag、`package.json` 版本、构建提交和 tarball 内容完全一致。
+如果同一个版本已经发布，只有在 npm 上的完整性值相同才会跳过重复发布；内容不一致会直接失败。
+
+首次启用自动发布前，在 npm 包的 Trusted Publishers 设置中授权这个 GitHub 仓库的
+`.github/workflows/package.yml` workflow。这个流程使用 npm OIDC，不需要把 `NPM_TOKEN`
+放进 GitHub Secrets。包的公开发布配置位于 [`package.json`](./package.json) 的 `publishConfig`。
+
+发布新版本时，先把 `package.json` 的版本改成新的稳定 semver，提交到 `main`，再推送同名 tag：
+
+```bash
+git tag v0.1.1
+git push origin main v0.1.1
+```
+
+本地可以先检查实际会发布的文件，不会上传：
+
+```bash
+npm pack --dry-run
+npm publish --dry-run --access public --tag latest
+```
 
 ## 说明
 

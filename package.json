@@ -1,7 +1,6 @@
 {
   "name": "pi-claude-native-tools",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "Expose Claude Code native Read/Write/Bash/Edit/Grep tools when the active model id contains claude",
   "repository": {
@@ -16,6 +15,14 @@
   "keywords": [
     "pi-package"
   ],
+  "publishConfig": {
+    "access": "public",
+    "tag": "latest",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "files": [
+    "extensions"
+  ],
   "pi": {
     "extensions": [
       "./extensions/claude-native-tools/index.ts"
@@ -23,11 +30,15 @@
   },
   "scripts": {
     "generate:claude-tools": "node scripts/generate-claude-tools.mjs",
-    "test": "node --experimental-strip-types --test test/translate.test.ts test/replace-all.test.ts"
+    "test": "node --experimental-strip-types --test test/translate.test.ts test/replace-all.test.ts test/release.test.ts",
+    "prepublishOnly": "npm test"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

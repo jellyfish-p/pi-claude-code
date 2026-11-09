@@ -1,89 +1,141 @@
-name: Package
+name: CI and release
 
 on:
+  workflow_dispatch:
+  pull_request:
   push:
     branches:
       - master
       - main
     tags:
       - "v*.*.*"
-  pull_request:
-  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
-  group: package-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: package-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  test:
-    name: Test (pack only on tag)
+  package:
+    name: Test and pack
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
           node-version: "22.x"
 
-      - name: Verify tag matches package version
+      - name: Validate release metadata
         if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          set -euo pipefail
-          VERSION="$(node -p "require('./package.json').version")"
-          test "v${VERSION}" = "${GITHUB_REF_NAME}" || {
-            echo "tag ${GITHUB_REF_NAME} does not match package.json version v${VERSION}" >&2
-            exit 1
-          }
+        run: node --experimental-strip-types tools/release.ts metadata
 
       - name: Run tests
         run: npm test
 
       - name: Build npm tarball
-        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           set -euo pipefail
           mkdir -p dist
-          npm pack --pack-destination dist --json | tee dist/pack.json
+          npm pack --pack-destination dist --json > dist/pack.json
+          node --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import { readFileSync, writeFileSync } from "node:fs";
+
+          const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
+          const pack = JSON.parse(readFileSync("dist/pack.json", "utf8"))[0];
+          const filename = pack.filename;
+          const content = readFileSync(`dist/${filename}`);
+          const sha256 = createHash("sha256").update(content).digest("hex");
+          const integrity = `sha512-${createHash("sha512").update(content).digest("base64")}`;
+
+          writeFileSync(`dist/${filename}.sha256`, `${sha256}  ${filename}\n`);
+          writeFileSync("dist/build-manifest.json", JSON.stringify({
+            name: packageJson.name,
+            version: packageJson.version,
+            commit: process.env.GITHUB_SHA,
+            filename,
+            sha256,
+            integrity,
+          }, null, 2) + "\n");
+          NODE
 
       - name: Inspect tarball
-        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           set -euo pipefail
           TARBALL="$(find dist -maxdepth 1 -name '*.tgz' -print -quit)"
           test -n "$TARBALL"
-          tar -tzf "$TARBALL" | sed -n '1,80p'
+          tar -tzf "$TARBALL"
 
-      - name: Upload npm tarball
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Upload npm package
         uses: actions/upload-artifact@v7
         with:
           name: pi-claude-native-tools
-          path: dist/*.tgz
+          path: |
+            dist/*.tgz
+            dist/*.tgz.sha256
+            dist/build-manifest.json
           if-no-files-found: error
           retention-days: 30
 
-  release-asset:
-    name: Attach tarball to GitHub Release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: test
-    runs-on: ubuntu-24.04
+  npm-publish:
+    name: Publish to npm
+    needs: package
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24.x"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Download npm package
+        uses: actions/download-artifact@v8
+        with:
+          name: pi-claude-native-tools
+          path: release
+
+      - name: Publish verified archive with npm OIDC
+        run: node --experimental-strip-types tools/release.ts publish release
+
+  github-release:
+    name: Attach package to GitHub Release
+    needs: [package, npm-publish]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: write
 
     steps:
-      - name: Download npm tarball
+      - name: Download npm package
         uses: actions/download-artifact@v8
         with:
           name: pi-claude-native-tools
-          path: dist
+          path: release
 
-      - name: Upload release asset
+      - name: Upload GitHub release assets
         uses: softprops/action-gh-release@v3
         with:
-          files: dist/*.tgz
+          files: release/*
           generate_release_notes: true
