@@ -67,18 +67,24 @@ export function translateToolCallBlock(block: ToolCallBlock, mode: ToolMode): To
 export function translateMessages(messages: MessageLike[], mode: ToolMode): MessageLike[] {
 	const result: MessageLike[] = [];
 	const splitIds = new Map<string, string[]>();
+	const backgroundBashIds = new Set<string>();
 
 	for (const message of messages) {
 		if (message.role === "assistant") {
 			const translated = translateAssistantMessage(message, mode);
 			result.push(translated.message);
 			for (const [oldId, newIds] of translated.splitIds) splitIds.set(oldId, newIds);
+			if (mode === "pi" && Array.isArray(translated.message.content)) {
+				for (const block of translated.message.content) {
+					if (isToolCallBlock(block) && block.name === "Bash") backgroundBashIds.add(block.id);
+				}
+			}
 			continue;
 		}
 
 		if (message.role === "toolResult" && typeof message.toolCallId === "string") {
 			const ids = splitIds.get(message.toolCallId) ?? [message.toolCallId];
-			const toolName = typeof message.toolName === "string"
+			const toolName = typeof message.toolName === "string" && !backgroundBashIds.has(message.toolCallId)
 				? mapToolName(message.toolName, mode)
 				: message.toolName;
 
@@ -176,7 +182,8 @@ function toPiCalls(block: ToolCallBlock): ToolCallBlock[] {
 	if (name === "read" || name === "write" || name === "bash" || name === "edit" || name === "grep") return [block];
 	if (name === "Read") return [withArgs(block, "read", toPiReadArgs(args))];
 	if (name === "Write") return [withArgs(block, "write", toPiWriteArgs(args))];
-	if (name === "Bash") return [withArgs(block, "bash", toPiBashArgs(args))];
+	// Keep background calls routed to the adapter, which owns the task lifecycle.
+	if (name === "Bash") return [args.run_in_background === true ? block : withArgs(block, "bash", toPiBashArgs(args))];
 	if (name === "Grep") return [withArgs(block, "grep", toPiGrepArgs(args))];
 	if (name === "Edit") return toPiEditCalls(block, args);
 
@@ -304,6 +311,7 @@ function toClaudeGrepArgs(args: JsonObject): JsonObject {
 	const context = firstNumber(args.context, args["-C"], args["-A"], args["-B"]);
 	return {
 		pattern: args.pattern,
+		output_mode: "content",
 		...(typeof args.path === "string" ? { path: args.path } : {}),
 		...(typeof args.glob === "string" ? { glob: args.glob } : {}),
 		...(args.ignoreCase === true ? { "-i": true } : {}),

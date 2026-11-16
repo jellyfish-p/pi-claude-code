@@ -4,8 +4,8 @@
  * When the active model id contains `claude`, this extension exposes
  * `Read` / `Write` / `Bash` / `Edit` / `Grep` with Claude Code's native
  * descriptions and input schemas. Their implementations delegate to pi's
- * existing `read` / `write` / `bash` / `edit` / `grep` tools, so no filesystem
- * or shell path is duplicated.
+ * existing `read` / `write` / `bash` / `edit` / `grep` tools. Background Bash
+ * calls additionally expose task controls and a completion notification.
  *
  * Conversation history is translated before every request: pi tool calls
  * become Claude calls for Claude models, and Claude calls become pi calls for
@@ -14,6 +14,10 @@
  * merged into one pi `edits[]` call.
  */
 
+import { stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type {
 	ExtensionAPI,
@@ -23,11 +27,12 @@ import type {
 	ToolLoadoutChanges,
 } from "@earendil-works/pi-coding-agent";
 import type { TSchema } from "typebox";
+import { BackgroundBashTasks, DEFAULT_BACKGROUND_TIMEOUT, MAX_BACKGROUND_TIMEOUT } from "./background-bash";
 import { CLAUDE_TOOL_CATALOG } from "./catalog";
 import { buildReplaceAllEdit } from "./replace-all";
+import { formatBashResult, formatEditResult, formatGrepResult, formatReadResult, formatWriteResult } from "./results";
 import {
 	isClaudeModelId,
-	translateAssistantMessage,
 	translateMessages,
 	type ToolMode,
 } from "./translate";
@@ -48,11 +53,18 @@ const CLAUDE_TO_PI: Readonly<Record<string, string>> = {
 	Grep: "grep",
 };
 
+const taskParameters = {
+	type: "object",
+	properties: { task_id: { type: "string", description: "The task ID returned by a background Bash call." } },
+	required: ["task_id"],
+	additionalProperties: false,
+} as unknown as TSchema;
+
 function modeForModel(modelId: string | undefined): ToolMode {
 	return isClaudeModelId(modelId) ? "claude" : "pi";
 }
 
-function desiredTools(names: string[], mode: ToolMode): string[] {
+function desiredTools(names: string[], mode: ToolMode, hasBashTasks: boolean): string[] {
 	const result: string[] = [];
 	const seen = new Set<string>();
 	const add = (name: string) => {
@@ -69,15 +81,18 @@ function desiredTools(names: string[], mode: ToolMode): string[] {
 			if (PI_TO_CLAUDE[name]) add(PI_TO_CLAUDE[name]);
 			if (CLAUDE_TO_PI[name]) add(CLAUDE_TO_PI[name]);
 		}
-		return result;
+	} else {
+		for (const name of names) {
+			if (CLAUDE_TO_PI[name]) continue;
+			add(name);
+		}
+		for (const name of names) {
+			if (CLAUDE_TO_PI[name]) add(CLAUDE_TO_PI[name]);
+		}
 	}
-
-	for (const name of names) {
-		if (CLAUDE_TO_PI[name]) continue;
-		add(name);
-	}
-	for (const name of names) {
-		if (CLAUDE_TO_PI[name]) add(CLAUDE_TO_PI[name]);
+	if (hasBashTasks || seen.has("Bash")) {
+		add("TaskOutput");
+		add("TaskStop");
 	}
 	return result;
 }
@@ -115,6 +130,15 @@ function unwrap(outcome: Awaited<ReturnType<ExtensionToolContext["executeTool"]>
 
 export default function claudeNativeTools(pi: ExtensionAPI) {
 	let lastMode: ToolMode = "pi";
+	const bashTasks = new BackgroundBashTasks((task) => {
+		const exitCode = task.exit_code === undefined ? "" : ` with exit code ${task.exit_code}`;
+		pi.sendMessage({
+			customType: "claude-native-tools:background-bash",
+			content: `Background Bash task ${task.task_id} finished${exitCode} (${task.status}). Use TaskOutput with this task ID to read its output if needed.`,
+			display: true,
+			details: task,
+		}, { triggerTurn: true, deliverAs: "followUp" });
+	});
 
 	function syncToolProfile(ctx: ExtensionContext, modelId = ctx.model?.id): void {
 		const mode = modeForModel(modelId);
@@ -123,7 +147,7 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 		const active = pi.getActiveTools();
 		if (active.length === 0) return;
 
-		const desired = desiredTools(active, mode);
+		const desired = desiredTools(active, mode, bashTasks.hasTasks);
 		if (!sameNames(active, desired)) pi.setActiveTools(desired);
 	}
 
@@ -134,6 +158,7 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		syncToolProfile(ctx);
 	});
+	pi.on("session_shutdown", () => bashTasks.close());
 
 	pi.on("model_select", (event, ctx) => {
 		syncToolProfile(ctx, event.model.id);
@@ -147,7 +172,7 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 		if (pi.getActiveTools().length === 0 && selected && selected.length > 0) {
 			const mode = modeForModel(ctx.model?.id);
 			lastMode = mode;
-			pi.setActiveTools(desiredTools([...selected], mode));
+			pi.setActiveTools(desiredTools([...selected], mode, bashTasks.hasTasks));
 			return;
 		}
 		syncToolProfile(ctx);
@@ -157,17 +182,6 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 		const mode = modeForContext(ctx);
 		const messages = translateMessages(event.messages as never, mode);
 		return { messages: messages as AgentMessage[] };
-	});
-
-	pi.on("message_end", async (event, ctx) => {
-		if (event.message.role !== "assistant") return;
-		// Session JSONL always stores pi's native shape. Claude tool calls are a
-		// request-time projection: normalize them back to pi before pi persists
-		// the assistant message and dispatches the tools.
-		const normalized = await normalizeReplaceAll(event.message, ctx);
-		const translated = translateAssistantMessage(normalized.message as never, "pi");
-		if (!normalized.changed && !translated.changed) return;
-		return { message: translated.message as AgentMessage };
 	});
 
 	pi.registerTool({
@@ -188,7 +202,9 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 			const args: Record<string, unknown> = { path: input.file_path };
 			if (typeof input.offset === "number") args.offset = input.offset;
 			if (typeof input.limit === "number") args.limit = input.limit;
-			return unwrap(await ctx.executeTool("read", args, { signal, onUpdate }));
+			const result = unwrap(await ctx.executeTool("read", args, { signal, onUpdate }));
+			const offset = typeof input.offset === "number" ? Math.max(1, input.offset) : 1;
+			return formatReadResult(result, offset, typeof input.limit === "number" ? input.limit : undefined);
 		},
 	});
 
@@ -200,6 +216,7 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 		parameters: CLAUDE_TOOL_CATALOG.Write.input_schema as unknown as TSchema,
 		defaultActive: false,
 		prepareLoadout: hidePiAliases,
+		executionMode: "sequential",
 		annotations: { destructiveHint: true },
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const input = params as Record<string, unknown>;
@@ -210,17 +227,19 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 				return errorResult("Write: content must be a string.");
 			}
 
-			return unwrap(await ctx.executeTool("write", {
+			const before = await inspectPath(resolveLocalPath(ctx.cwd, input.file_path));
+			const result = unwrap(await ctx.executeTool("write", {
 				path: input.file_path,
 				content: input.content,
 			}, { signal, onUpdate }));
+			return formatWriteResult(result, input.file_path, before === undefined ? undefined : before !== null);
 		},
 	});
 
 	pi.registerTool({
 		name: "Bash",
 		label: "Bash",
-		description: CLAUDE_TOOL_CATALOG.Bash.description,
+		description: `${CLAUDE_TOOL_CATALOG.Bash.description}\n\nA background call returns a task ID immediately. Use TaskOutput to inspect its current output and TaskStop to stop it.`,
 		promptSnippet: "Execute a bash command",
 		parameters: CLAUDE_TOOL_CATALOG.Bash.input_schema as unknown as TSchema,
 		defaultActive: false,
@@ -229,7 +248,13 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const input = params as Record<string, unknown>;
 			if (input.run_in_background === true) {
-				return errorResult("Bash: pi's bash tool does not support run_in_background yet.");
+				if (signal?.aborted) return errorResult("Bash: the call was cancelled.");
+				if (typeof input.command !== "string") return errorResult("Bash: command must be a string.");
+				const timeout = input.timeout ?? DEFAULT_BACKGROUND_TIMEOUT;
+				if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0 || timeout > MAX_BACKGROUND_TIMEOUT) {
+					return errorResult(`Bash: background timeout must be greater than 0 and at most ${MAX_BACKGROUND_TIMEOUT} ms.`);
+				}
+				return bashTasks.start(input.command, timeout, ctx.executeTool);
 			}
 
 			const args: Record<string, unknown> = { command: input.command };
@@ -237,7 +262,33 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 				// Claude Code expresses Bash timeouts in milliseconds; pi uses seconds.
 				args.timeout = input.timeout / 1000;
 			}
-			return unwrap(await ctx.executeTool("bash", args, { signal, onUpdate }));
+			return formatBashResult(unwrap(await ctx.executeTool("bash", args, { signal, onUpdate })));
+		},
+	});
+
+	pi.registerTool({
+		name: "TaskOutput",
+		label: "TaskOutput",
+		description: "Get the current status and captured stdout and stderr of a background Bash task by ID. Returns immediately, including while the task is running.",
+		parameters: taskParameters,
+		defaultActive: false,
+		annotations: { readOnlyHint: true },
+		async execute(_toolCallId, params) {
+			const id = (params as { task_id: string }).task_id;
+			return bashTasks.output(id) ?? errorResult(`TaskOutput: unknown Bash task ID ${id}.`);
+		},
+	});
+
+	pi.registerTool({
+		name: "TaskStop",
+		label: "TaskStop",
+		description: "Stop a background Bash task by ID. Use TaskOutput to check its final status and read any output it produced.",
+		parameters: taskParameters,
+		defaultActive: false,
+		annotations: { destructiveHint: true },
+		async execute(_toolCallId, params) {
+			const id = (params as { task_id: string }).task_id;
+			return bashTasks.stop(id) ?? errorResult(`TaskStop: unknown Bash task ID ${id}.`);
 		},
 	});
 
@@ -260,10 +311,12 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 				return errorResult("Edit: new_string must be a string.");
 			}
 
-			const editArgs = input.replace_all === true
+			const path = typeof input.file_path === "string" ? input.file_path : "";
+			const replaceAll = input.replace_all === true;
+			const editArgs = replaceAll
 				? await buildReplaceAllEdit(
 					ctx.cwd,
-					typeof input.file_path === "string" ? input.file_path : "",
+					path,
 					input.old_string,
 					input.new_string,
 				)
@@ -275,7 +328,7 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 					}],
 				};
 
-			return unwrap(await ctx.executeTool("edit", editArgs, { signal, onUpdate }));
+			return formatEditResult(unwrap(await ctx.executeTool("edit", editArgs, { signal, onUpdate })), path, replaceAll);
 		},
 	});
 
@@ -291,7 +344,7 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const input = params as Record<string, unknown>;
 			const unsupported: string[] = [];
-			if (typeof input.output_mode === "string" && input.output_mode !== "content") {
+			if (input.output_mode === "count") {
 				unsupported.push(`output_mode=${input.output_mode}`);
 			}
 			if (input["-o"] === true) unsupported.push("-o");
@@ -302,62 +355,53 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 				return errorResult(`Grep: pi's grep tool does not support ${unsupported.join(", ")} yet.`);
 			}
 
+			const mode = input.output_mode === "content" ? "content" : "files_with_matches";
+			const limit = Math.floor(firstNumber(input.head_limit) ?? 250);
+			const outputLimit = limit > 0 ? limit : Number.MAX_SAFE_INTEGER;
 			const context = firstNumber(input.context, input["-C"]);
 			const asymmetric = Math.max(firstNumber(input["-A"]) ?? 0, firstNumber(input["-B"]) ?? 0);
+			const contextLines = mode === "content" ? context ?? asymmetric : 0;
 			const args: Record<string, unknown> = { pattern: input.pattern };
 			if (typeof input.path === "string") args.path = input.path;
 			if (typeof input.glob === "string") args.glob = input.glob;
 			if (input["-i"] === true) args.ignoreCase = true;
-			if (context !== undefined) args.context = context;
-			else if (asymmetric > 0) args.context = asymmetric;
-			if (typeof input.head_limit === "number") args.limit = input.head_limit;
-			return unwrap(await ctx.executeTool("grep", args, { signal, onUpdate }));
+			if (contextLines > 0) args.context = contextLines;
+			args.limit = mode === "content" ? outputLimit : Number.MAX_SAFE_INTEGER;
+			const searchPath = typeof input.path === "string" ? resolveLocalPath(ctx.cwd, input.path) : ctx.cwd;
+			const target = await inspectPath(searchPath);
+			const result = unwrap(await ctx.executeTool("grep", args, { signal, onUpdate }));
+			return formatGrepResult(result, {
+				mode,
+				relativePath: relative(ctx.cwd, searchPath),
+				singleFile: target?.isFile() ?? false,
+				lineNumbers: input["-n"] !== false,
+				context: contextLines > 0,
+				limit: outputLimit,
+			});
 		},
 	});
 }
 
-async function normalizeReplaceAll(
-	message: AgentMessage,
-	ctx: ExtensionContext,
-): Promise<{ message: AgentMessage; changed: boolean }> {
-	if (message.role !== "assistant" || !Array.isArray(message.content)) {
-		return { message, changed: false };
-	}
-
-	let changed = false;
-	const content: unknown[] = [];
-	for (const block of message.content) {
-		if (!isClaudeReplaceAll(block)) {
-			content.push(block);
-			continue;
+function resolveLocalPath(cwd: string, input: string): string {
+	const path = input.replace(/^@/, "");
+	if (path.startsWith("file://")) {
+		try {
+			return fileURLToPath(path);
+		} catch {
+			return resolve(cwd, path);
 		}
-
-		const input = block.arguments;
-		const args = await buildReplaceAllEdit(
-			ctx.cwd,
-			typeof input.file_path === "string" ? input.file_path : "",
-			typeof input.old_string === "string" ? input.old_string : "",
-			typeof input.new_string === "string" ? input.new_string : "",
-		);
-		content.push({ ...block, name: "edit", arguments: args });
-		changed = true;
 	}
-
-	return changed
-		? { message: { ...message, content } as AgentMessage, changed: true }
-		: { message, changed: false };
+	if (path === "~") return homedir();
+	if (/^~[/\\]/.test(path)) return resolve(homedir(), path.slice(2));
+	return resolve(cwd, path);
 }
 
-function isClaudeReplaceAll(value: unknown): value is {
-	type: "toolCall";
-	name: "Edit" | "edit";
-	arguments: { file_path?: unknown; old_string?: unknown; new_string?: unknown };
-} {
-	if (typeof value !== "object" || value === null) return false;
-	const block = value as Record<string, unknown>;
-	if (block.type !== "toolCall" || (block.name !== "Edit" && block.name !== "edit")) return false;
-	if (typeof block.arguments !== "object" || block.arguments === null) return false;
-	return (block.arguments as Record<string, unknown>).replace_all === true;
+async function inspectPath(path: string) {
+	try {
+		return await stat(path);
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : undefined;
+	}
 }
 
 function firstNumber(...values: unknown[]): number | undefined {

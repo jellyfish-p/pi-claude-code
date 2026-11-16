@@ -13,8 +13,8 @@ export interface ReplaceAllEdit {
  * be non-empty, so a direct "replace every occurrence" call cannot be
  * expressed as N copies of the same oldText. Instead, we return one edit whose
  * oldText spans the first through the last occurrence and whose newText has
- * every occurrence replaced. That keeps the persisted tool call in pi's native
- * `edit` shape.
+ * every occurrence replaced. The adapter can submit the change as one pi
+ * `edit` operation.
  *
  * If the file cannot be read or oldString is not present, return the original
  * single replacement. pi's own edit will then report the real error.

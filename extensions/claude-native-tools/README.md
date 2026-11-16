@@ -8,7 +8,8 @@ variants for the currently active pi tools:
 
 - `Read` — Claude Code's `file_path` / `offset` / `limit` schema (pi-supported subset)
 - `Write` — Claude Code's native `file_path` / `content` schema and description
-- `Bash` — Claude Code's native milliseconds timeout and background/sandbox fields
+- `Bash` — Claude Code's millisecond timeout and `run_in_background` flag
+- `TaskOutput` / `TaskStop` — inspect or stop a background Bash task by `task_id`
 - `Edit` — Claude Code's native `file_path` / `old_string` / `new_string` / `replace_all` schema
 - `Grep` — Claude Code's native ripgrep-style schema
 
@@ -17,7 +18,7 @@ variants for the currently active pi tools:
 > by default; enable it with `--tools +grep` (or `defaultTools` in settings) if
 > you want the Claude-native `Grep` profile as well.
 
-The tool descriptions and JSON schemas are generated verbatim from
+The tool catalog is generated from
 [`docs/data/tools.json`](../../docs/data/tools.json) by
 [`scripts/generate-claude-tools.mjs`](../../scripts/generate-claude-tools.mjs).
 
@@ -33,17 +34,15 @@ The tool descriptions and JSON schemas are generated verbatim from
   - one pi `edit` with `edits[]` becomes multiple Claude `Edit` calls
   - multiple Claude `Edit` calls stay separate and are never merged into one
     pi `edits[]` call
-- Session JSONL always stores pi's native/base shape. `message_end` normalizes
-  Claude tool calls back to `read` / `write` / `bash` / `edit` / `grep` before
-  pi persists the assistant message and dispatches tools. Claude names are only
-  a request-time projection.
-- The registered Claude tools also have adapters that delegate to
-  `ctx.executeTool()` as a fallback for direct/API calls; normal model calls
-  are normalized to pi base first.
-- `Edit.replace_all: true` is converted into one base pi `edit` whose
-  `oldText` spans the first through last occurrence and whose `newText`
-  replaces every occurrence in that span. This keeps JSONL in pi's native
-  `edit` shape instead of falling back to `write`.
+- The Claude adapters preserve their original arguments in the session so the
+  matching result can reflect `Edit.replace_all` and `Grep.output_mode`. The
+  conversation translator also accepts sessions stored with pi tool names.
+- The adapters format the returned text after the pi tool runs. `Read` numbers
+  text lines from the requested offset. `Edit` and `Write` confirm the type of
+  change. `Grep` defaults to matching file paths and supports `content` mode.
+  Foreground `Bash` puts a nonzero exit code before the combined output.
+- `Edit.replace_all: true` delegates one pi `edit` whose `oldText` spans the
+  first through last occurrence and whose `newText` replaces each occurrence.
 - `Write` uses Claude Code's native description and schema verbatim, including
   its stricter wording: `file_path` must be absolute, and overwriting an
   existing file requires a prior `Read`. pi's `write` is more permissive (it
@@ -69,6 +68,19 @@ For a local test without a provider call:
 pi -e ./extensions/claude-native-tools/index.ts --list-models
 ```
 
+## Background Bash
+
+Set `run_in_background: true` to receive a task ID immediately. Pass `task_id`
+to `TaskOutput` for the current status and captured stdout and stderr. Call
+`TaskStop` to request cancellation. Once the process exits, the session sends
+the model a completion message with the task ID and status, starting a turn if
+the model is idle or queuing a follow-up if it is busy.
+
+The background `timeout` defaults to 600,000 ms and accepts up to 7,200,000 ms.
+Task records stay in memory for the running session. Exiting, switching, or
+reloading the session cancels outstanding tasks and clears their records. Keep
+a TUI or RPC session open to receive completion notifications between turns.
+
 ## Known limitations
 
 These are intentionally left for later phases so the first step stays small:
@@ -78,12 +90,12 @@ These are intentionally left for later phases so the first step stays small:
   prompt-level constraints, not execution-level constraints yet.
 - `Read` intentionally exposes only pi-supported fields: no `pages` / PDF
   selection and no `allow_large`. Its prompt is trimmed accordingly.
-- `Bash.run_in_background` is still unsupported; normal model calls drop it
-  when normalized to pi base.
-- `Grep` supports the common fields (`pattern`, `path`, `glob`, `-i`, `context`,
-  `-C`, `-A`, `-B`, `head_limit`); `output_mode`, `-o`, `type`, `offset`, and
-  `multiline` are not supported. `-A` / `-B` are approximated with pi's single
-  symmetric `context` window.
+- `Bash` uses pi's existing shell configuration and permissions for both modes.
+  The captured `dangerouslyDisableSandbox` field has no effect in this extension.
+- `Grep` supports `files_with_matches` and `content`. The output is subject to
+  pi's search limits. The `count` mode and the `-o`, `type`, `offset`, and
+  `multiline` fields are unsupported. `-A` and `-B` use pi's symmetric context
+  window.
 - The extension gates only on `ctx.model.id` matching `/claude/i`; it does not
   inspect the provider API or the outbound HTTP payload.
 

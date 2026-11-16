@@ -56,7 +56,7 @@ test("keeps a pi write intact in pi mode", () => {
 	assert.deepEqual(calls(translated), [original]);
 });
 
-test("normalizes Claude Write to base pi write", () => {
+test("projects Claude Write in the pi transcript", () => {
 	const original = call("Write", { file_path: "/tmp/a", content: "x" });
 	const translated = translateAssistantMessage({ role: "assistant", content: [original] }, "pi");
 	assert.equal(translated.changed, true);
@@ -71,6 +71,17 @@ test("translates bash timeout units in both directions", () => {
 	assert.deepEqual(piCall, call("bash", { command: "ls", timeout: 30 }));
 });
 
+test("keeps background Bash calls routed to the adapter at dispatch and on replay", () => {
+	const background = call("Bash", { command: "npm run build", timeout: 30000, run_in_background: true });
+	const result = { role: "toolResult", toolCallId: background.id, toolName: "Bash" };
+	const messages = [{ role: "assistant", content: [background] }, result];
+	assert.deepEqual(translateMessages(messages, "pi"), messages);
+	assert.deepEqual(translateMessages(messages, "claude"), messages);
+	assert.deepEqual(translateToolCallBlock(call("Bash", { command: "ls", run_in_background: false }), "pi"), [
+		call("bash", { command: "ls" }),
+	]);
+});
+
 test("translates pi grep to Claude Grep and back", () => {
 	const [claude] = translateToolCallBlock(
 		call("grep", { pattern: "foo", path: "src", glob: "*.ts", ignoreCase: true, context: 2, limit: 5 }),
@@ -78,6 +89,7 @@ test("translates pi grep to Claude Grep and back", () => {
 	);
 	assert.deepEqual(claude, call("Grep", {
 		pattern: "foo",
+		output_mode: "content",
 		path: "src",
 		glob: "*.ts",
 		"-i": true,
