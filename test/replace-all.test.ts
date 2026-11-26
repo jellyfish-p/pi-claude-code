@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join, relative } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { CLAUDE_TOOL_CATALOG } from "../extensions/claude-native-tools/catalog.ts";
 import { buildReplaceAllEdit } from "../extensions/claude-native-tools/replace-all.ts";
@@ -94,6 +95,22 @@ test("replace_all normalizes CRLF before matching", async () => {
 			path: file,
 			edits: [{ oldText: "a\nx\na", newText: "A\nx\nA" }],
 		});
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("replace_all accepts the same file URI, at-prefix and home path forms as pi", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pi-replace-all-"));
+	try {
+		const file = join(dir, "replace.txt");
+		await writeFile(file, "alpha alpha", "utf8");
+		for (const path of [file, "replace.txt", pathToFileURL(file).href, `@${file}`, `~/${relative(homedir(), file)}`]) {
+			assert.deepEqual(await buildReplaceAllEdit(dir, path, "alpha", "beta"), {
+				path,
+				edits: [{ oldText: "alpha alpha", newText: "beta beta" }],
+			});
+		}
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}

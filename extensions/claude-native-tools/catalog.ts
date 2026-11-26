@@ -57,7 +57,7 @@ export const CLAUDE_TOOL_CATALOG = {
 	},
 	"Bash": {
 		"name": "Bash",
-		"description": "Executes a bash command and returns its output.\n\nThis tool runs Git Bash (POSIX sh), not cmd.exe or PowerShell. Use Unix shell syntax: `/dev/null` not `NUL`, forward slashes, `$VAR` not `%VAR%` or `$env:VAR`.\n\n- `cd` carries to the next call only in the main session, if the command succeeds and ends inside the working directories. Outside them the shell returns to the start folder; otherwise it stays where it was. Prefer absolute paths — `cd` in a compound command can trigger a permission prompt. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.\n- IMPORTANT: Avoid using this tool to run `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user.\n- Command output is displayed to you, not reliably to the user.\n- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command.\n- `run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. With it, `timeout` is how long the command may run in the background (default 600000, max 7200000); at that limit it is stopped and you are re-invoked. No `&` needed. Foreground `sleep` is blocked; use Monitor with an until-loop to wait on a condition.\n\n# Git\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- GitHub notifies the owner of any `@name` written in a PR, issue, or comment. Write a bare `@name` only for a real login you mean to notify. Put roles, placeholders, and code (`@human`, `@reviewer`, `@types/node`) in backticks or drop the `@`, even when copied from project files.\n- Commit or push only when the user asks. If on the default branch, branch first.\n- End git commit messages and PR bodies with the attribution lines given in the conversation's system-reminder, when one is present.",
+		"description": "Executes a command using pi's configured Bash tool and returns its output.\n\n- Each command uses pi's shell and working-directory behavior. Use the shell syntax appropriate to the host.\n- Prefer Read, Glob, Grep, Write, and Edit for filesystem operations they support.\n- Foreground timeout is in milliseconds: default 120000, maximum 600000. Values must be greater than zero.\n- With run_in_background: true, the command runs across turns and returns a task ID immediately. Background timeout defaults to 600000 ms, with a maximum of 7200000 ms. Use TaskOutput to inspect output and TaskStop to stop the task. Completion sends a notification.\n- Commands use pi's existing validation, hooks, and permissions. This adapter does not provide a sandbox override.\n- Commit or push only when the user asks.",
 		"input_schema": {
 			"$schema": "https://json-schema.org/draft/2020-12/schema",
 			"type": "object",
@@ -67,8 +67,10 @@ export const CLAUDE_TOOL_CATALOG = {
 					"type": "string"
 				},
 				"timeout": {
-					"description": "Optional timeout in milliseconds (max 600000 for a foreground command)",
-					"type": "number"
+					"description": "Timeout in milliseconds, greater than zero. Foreground: default 120000, max 600000. Background: default 600000, max 7200000.",
+					"type": "number",
+					"exclusiveMinimum": 0,
+					"maximum": 7200000
 				},
 				"description": {
 					"description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nSay what the command does in plain words: do not echo the command's text, its flags, or file paths - the user reads this description, often without seeing the command.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"",
@@ -77,16 +79,34 @@ export const CLAUDE_TOOL_CATALOG = {
 				"run_in_background": {
 					"description": "Set to true to run this command in the background. With it, `timeout` limits how long the command may run in the background before it is stopped (default 600000 ms, max 7200000 ms).",
 					"type": "boolean"
-				},
-				"dangerouslyDisableSandbox": {
-					"description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing.",
-					"type": "boolean"
 				}
 			},
 			"required": [
 				"command"
 			],
-			"additionalProperties": false
+			"additionalProperties": false,
+			"anyOf": [
+				{
+					"properties": {
+						"run_in_background": {
+							"const": true
+						}
+					},
+					"required": [
+						"run_in_background"
+					]
+				},
+				{
+					"properties": {
+						"run_in_background": {
+							"const": false
+						},
+						"timeout": {
+							"maximum": 600000
+						}
+					}
+				}
+			]
 		}
 	},
 	"Edit": {
@@ -124,7 +144,7 @@ export const CLAUDE_TOOL_CATALOG = {
 	},
 	"Grep": {
 		"name": "Grep",
-		"description": "Content search built on ripgrep. Prefer this over `grep`/`rg` via Bash — results integrate with the permission UI and file links.\n\n- Full regex syntax (e.g. \"log.*Error\", \"function\\s+\\w+\"). Ripgrep, not grep — escape literal braces (`interface\\{\\}`).\n- Filter with `glob` (e.g. \"**/*.tsx\") or `type` (e.g. \"js\", \"py\", \"rust\").\n- `output_mode`: \"content\" (matching lines), \"files_with_matches\" (paths only, default), or \"count\".\n- `multiline: true` for patterns that span lines.",
+		"description": "Search file contents through pi's ripgrep tool, with pi's existing validation, hooks, and permissions.\n\n- Supports ripgrep regular expressions, optional path and glob filters, and case-insensitive search with -i.\n- output_mode is files_with_matches (paths only, default) or content (matching lines).\n- In content mode, context or -C adds the same number of lines before and after each match; -n controls line numbers (default true).\n- head_limit limits returned lines or file paths (default 250; 0 removes this adapter's limit).\n- Both modes use pi's bounded content search. A large number of matching lines can truncate the underlying search before every matching file is found, including in files_with_matches mode. Truncation notices are preserved; narrow the search when one appears.",
 		"input_schema": {
 			"$schema": "https://json-schema.org/draft/2020-12/schema",
 			"type": "object",
@@ -142,29 +162,22 @@ export const CLAUDE_TOOL_CATALOG = {
 					"type": "string"
 				},
 				"output_mode": {
-					"description": "Output mode: \"content\" shows matching lines (supports -A/-B/-C context, -n line numbers, head_limit), \"files_with_matches\" shows file paths (supports head_limit), \"count\" shows match counts (supports head_limit). Defaults to \"files_with_matches\".",
+					"description": "content returns matching lines; files_with_matches returns paths (default). Both can be truncated by pi's underlying content-search budget.",
 					"type": "string",
 					"enum": [
 						"content",
-						"files_with_matches",
-						"count"
+						"files_with_matches"
 					]
-				},
-				"-B": {
-					"description": "Number of lines to show before each match (rg -B). Requires output_mode: \"content\", ignored otherwise.",
-					"type": "number"
-				},
-				"-A": {
-					"description": "Number of lines to show after each match (rg -A). Requires output_mode: \"content\", ignored otherwise.",
-					"type": "number"
 				},
 				"-C": {
 					"description": "Alias for context.",
-					"type": "number"
+					"type": "integer",
+					"minimum": 0
 				},
 				"context": {
 					"description": "Number of lines to show before and after each match (rg -C). Requires output_mode: \"content\", ignored otherwise.",
-					"type": "number"
+					"type": "integer",
+					"minimum": 0
 				},
 				"-n": {
 					"description": "Show line numbers in output (rg -n). Requires output_mode: \"content\", ignored otherwise. Defaults to true.",
@@ -174,25 +187,32 @@ export const CLAUDE_TOOL_CATALOG = {
 					"description": "Case insensitive search (rg -i)",
 					"type": "boolean"
 				},
-				"-o": {
-					"description": "Print only the matched (non-empty) parts of each matching line, one match per output line (rg -o / --only-matching). Requires output_mode: \"content\", ignored otherwise. Defaults to false.",
-					"type": "boolean"
-				},
-				"type": {
-					"description": "File type to search (rg --type). Common types: js, py, rust, go, java, etc. More efficient than include for standard file types.",
+				"head_limit": {
+					"description": "Maximum returned content lines or file paths (default 250). Set 0 to remove the adapter limit; pi's content-search budget still applies.",
+					"type": "integer",
+					"minimum": 0
+				}
+			},
+			"required": [
+				"pattern"
+			],
+			"additionalProperties": false
+		}
+	},
+	"Glob": {
+		"name": "Glob",
+		"description": "Fast file pattern matching. Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\". Returns matching file paths sorted by modification time.\n\n- Searches the given directory, or the current working directory when path is omitted.\n- Includes hidden and gitignored files. Does not follow directory symlinks.\n- Patterns without a slash match file names at any depth. Relative patterns with a slash match paths relative to the session working directory, even when path narrows the search. An absolute pattern chooses its own search directory and overrides path.\n- Returns paths relative to the session working directory, sorted by modification time (oldest first, matching the verified Claude Code 2.1.316 behavior), with a maximum of 100 files. A truncation notice means the pattern should be narrowed.\n- Uses pi's Glob tool hooks and permissions; it does not execute pi's find tool.",
+		"input_schema": {
+			"$schema": "https://json-schema.org/draft/2020-12/schema",
+			"type": "object",
+			"properties": {
+				"pattern": {
+					"description": "The glob pattern to match files against",
 					"type": "string"
 				},
-				"head_limit": {
-					"description": "Limit output to first N lines/entries, equivalent to \"| head -N\". Works across all output modes: content (limits output lines), files_with_matches (limits file paths), count (limits count entries). Defaults to 250 when unspecified. Pass 0 for unlimited (use sparingly — large result sets waste context).",
-					"type": "number"
-				},
-				"offset": {
-					"description": "Skip first N lines/entries before applying head_limit, equivalent to \"| tail -n +N | head -N\". Works across all output modes. Defaults to 0.",
-					"type": "number"
-				},
-				"multiline": {
-					"description": "Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false.",
-					"type": "boolean"
+				"path": {
+					"description": "The directory to search in. If not specified, the current working directory will be used. IMPORTANT: Omit this field to use the default directory. DO NOT enter \"undefined\" or \"null\" - simply omit it for the default behavior. Must be a valid directory path if provided.",
+					"type": "string"
 				}
 			},
 			"required": [

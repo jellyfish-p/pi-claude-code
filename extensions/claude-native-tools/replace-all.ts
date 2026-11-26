@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { resolveLocalPath } from "./paths.ts";
 
 export interface ReplaceAllEdit {
 	path: string;
@@ -34,7 +34,7 @@ export async function buildReplaceAllEdit(
 
 	let content: string;
 	try {
-		content = await readFile(resolve(cwd, filePath), "utf8");
+		content = await readFile(resolveLocalPath(cwd, filePath), "utf8");
 	} catch {
 		return fallback;
 	}

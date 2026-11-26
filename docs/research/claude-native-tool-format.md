@@ -1,6 +1,6 @@
 # Claude 模型的原生工具格式：研究与实施计划
 
-> 状态：计划（未实施）
+> 状态：历史研究与阶段记录。原始方案基于 pi 1.4.0；当前实现已包含工具注册适配、后台 Bash、结果格式、Glob 和模式配置。使用方式与当前限制见 [扩展说明](../../extensions/claude-native-tools/README.md)，后续优先级见 [投入建议](worthwhile-next-steps.md)。下文保留当时的方案和阶段快照，不作为当前能力清单。
 >
 > 适用快照：pi `1.4.0`、Claude Code `2.1.316`、本文仓库的抓包 `docs/data/tools.json`
 >

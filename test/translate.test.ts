@@ -221,3 +221,69 @@ test("is idempotent for already-native calls", () => {
 	const result = translateAssistantMessage({ role: "assistant", content: [original] }, "claude");
 	assert.equal(result.changed, false);
 });
+
+test("find and Glob history translation preserves call/result pairing and original results", () => {
+	const original = call("find", { pattern: "**/*.ts", path: "src", limit: 50 });
+	const output = { role: "toolResult", toolCallId: original.id, toolName: "find", content: [{ type: "text", text: "a.ts\n[50 results limit reached]" }] };
+	const messages = [{ role: "assistant", content: [original] }, output];
+	const claude = translateMessages(messages, "claude");
+	assert.deepEqual(claude[0].content, [call("Glob", { pattern: "**/*.ts", path: "src" })]);
+	assert.deepEqual(claude[1], { ...output, toolName: "Glob" });
+	const native = translateMessages(claude, "pi");
+	assert.deepEqual(native[0].content, [call("find", { pattern: "**/*.ts", path: "src" })]);
+	assert.deepEqual(native[1], output);
+	assert.deepEqual(translateMessages(claude, "claude"), claude);
+	assert.equal(translateToolCallBlock(original, "pi")[0], original);
+});
+
+test("unsupported historical Grep arguments keep their original meaning and result name", () => {
+	for (const unsupported of [{ "-A": 1 }, { "-B": 2 }, { output_mode: "count" }, { multiline: true }, { type: "ts" }, { offset: 2 }, { "-o": true }]) {
+		const original = call("Grep", { pattern: "needle", ...unsupported });
+		const output = { role: "toolResult", toolCallId: original.id, toolName: "Grep", content: [{ type: "text", text: "original output" }] };
+		const messages = [{ role: "assistant", content: [original] }, output];
+		assert.deepEqual(translateMessages(messages, "pi"), messages);
+	}
+});
+
+test("long edit IDs with a common prefix remain distinct and paired after splitting", () => {
+	const prefix = "x".repeat(60);
+	const edits = [{ oldText: "a", newText: "b" }, { oldText: "c", newText: "d" }];
+	const messages = translateMessages([
+		{ role: "assistant", content: [call("edit", { path: "/a", edits }, `${prefix}a`), call("edit", { path: "/b", edits }, `${prefix}b`)] },
+		{ role: "toolResult", toolCallId: `${prefix}a`, toolName: "edit", content: [{ type: "text", text: "first" }] },
+		{ role: "toolResult", toolCallId: `${prefix}b`, toolName: "edit", content: [{ type: "text", text: "second" }] },
+	], "claude");
+	const translatedCalls = messages[0].content as ToolCallBlock[];
+	assert.equal(new Set(translatedCalls.map((entry) => entry.id)).size, 4);
+	assert.ok(translatedCalls.every((entry) => entry.id.length <= 64));
+	assert.deepEqual(messages.slice(1).map((message) => message.toolCallId), translatedCalls.map((entry) => entry.id));
+	assert.deepEqual(translateMessages(messages, "claude"), messages);
+});
+
+test("history follows actual aliases independently for native-only and mixed profiles", () => {
+	const nativeRead = call("read", { path: "/a", offset: 2 }, "native-read");
+	const pastRead = call("Read", { file_path: "/b", limit: 10 }, "past-read");
+	const nativeWrite = call("write", { path: "/c", content: "text" }, "native-write");
+	const blocks = [nativeRead, pastRead, nativeWrite];
+	const outputs = blocks.map((block) => ({ role: "toolResult", toolCallId: block.id, toolName: block.name, content: [{ type: "text", text: `${block.id} output` }] }));
+	const source = [{ role: "assistant", content: blocks }, ...outputs];
+	const mixed = translateMessages(source, "claude", new Set(["Write"]));
+	assert.deepEqual(mixed[0].content, [nativeRead, call("read", { path: "/b", limit: 10 }, "past-read"), call("Write", { file_path: "/c", content: "text" }, "native-write")]);
+	assert.deepEqual(mixed.slice(1).map((message) => message.toolName), ["read", "read", "Write"]);
+	assert.deepEqual(mixed.slice(1).map((message) => message.toolCallId), blocks.map((block) => block.id));
+	assert.ok(mixed.slice(1).every((message, index) => message.content === outputs[index].content));
+	assert.deepEqual(translateMessages(mixed, "claude", new Set(["Write"])), mixed);
+	const native = translateMessages(source, "claude", new Set());
+	assert.deepEqual(native.slice(1).map((message) => message.toolName), ["read", "read", "write"]);
+});
+
+test("partial profiles keep disabled-tool history, legacy Grep semantics, and background task identity", () => {
+	const blocks = [
+		call("edit", { path: "/old", edits: [{ oldText: "a", newText: "b" }, { oldText: "c", newText: "d" }] }, "deleted-edit"),
+		call("Grep", { pattern: "needle", "-A": 2 }, "legacy-grep"),
+		call("Bash", { command: "long-task", run_in_background: true }, "past-background"),
+	];
+	const outputs = blocks.map((block) => ({ role: "toolResult", toolCallId: block.id, toolName: block.name, content: [{ type: "text", text: "original result" }] }));
+	const source = [{ role: "assistant", content: blocks }, ...outputs];
+	assert.deepEqual(translateMessages(source, "claude", new Set(["Write"])), source);
+});

@@ -1,5 +1,7 @@
 # 落到 pi：兼容性改造清单
 
+> 本文保留早期抓包分析与设计建议，其中的 pi 工具清单和直接复制描述的建议已经过时。当前扩展按宿主能力裁剪描述，支持 `Grep`、独立 `Glob`、后台 Bash 和模式配置；实现与限制以 [扩展说明](../extensions/claude-native-tools/README.md) 为准。
+
 目标不是"把 Claude Code 抄一遍"，而是**让 Claude 在 pi 里看到它熟悉的契约**。
 模型的"像不像 Claude Code"几乎完全由三件事决定，按影响力排序：
 

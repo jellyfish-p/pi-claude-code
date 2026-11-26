@@ -34,6 +34,7 @@ mock /v1/messages  ──►  抓下完整 body（system / tools / messages）
 | [09-pi-compat-notes.md](09-pi-compat-notes.md) | **落到 pi 的具体改法**：工具映射、提示词怎么拼、哪些地方别自作聪明 |
 | [npm-publishing.md](npm-publishing.md) | npm 包内容、GitHub Actions 发布和 Trusted Publisher 配置 |
 | [research/](research/) | 专题研究与实施计划（如 Claude 模型的原生工具格式） |
+| [后续投入建议](research/worthwhile-next-steps.md) | 基于 v0.2.0 的优先级、已复现缺口、收益评测和最小交付范围 |
 | [skills/](skills/) | 12 个内置 skill 的逐字正文 |
 | [data/](data/) | 机器可读原件（tools.json / init.json / system-prompt.json …） |
 

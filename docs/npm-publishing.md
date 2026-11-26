@@ -5,8 +5,14 @@
 ```text
 extensions/claude-native-tools/
   catalog.ts
+  background-bash.ts
+  glob.ts
+  glob-pattern.ts
   index.ts
+  paths.ts
+  profile.ts
   replace-all.ts
+  results.ts
   translate.ts
   README.md
 LICENSE
@@ -25,6 +31,7 @@ npm pack --dry-run
 运行完整测试并模拟发布：
 
 ```bash
+npm ci
 npm test
 npm publish --dry-run --access public --tag latest
 ```
@@ -35,7 +42,8 @@ npm publish --dry-run --access public --tag latest
 
 - `main`、`master`、Pull Request 和手动运行会测试并生成 package artifact。
 - 推送 `v*.*.*` tag 会额外发布 npm 和创建 GitHub Release。
-- 打包 job 使用 Node 22。
+- 测试矩阵覆盖 Ubuntu / Windows、Node 22.19 / 24、pi 1.6.0 / 1.6.1；所有矩阵通过才进入发布。
+- 每个矩阵安装锁定依赖、检查 catalog 生成一致性、运行完整测试并检查打包；Ubuntu / Node 24 / pi 1.6.1 提供发布 artifact。
 - npm 发布 job 使用 Node 24，并下载测试 job 生成的同一份 tarball。
 - 发布前会校验包名、版本、tag、Git commit、SHA-256 和 npm integrity。
 - 发布完成后，GitHub Release 使用同一个 tarball、校验文件和构建清单。

@@ -1,8 +1,8 @@
 {
   "name": "pi-claude-native-tools",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
-  "description": "Expose Claude Code native Read/Write/Bash/Edit/Grep tools when the active model id contains claude",
+  "description": "Claude Code Read/Write/Bash/Edit/Grep/Glob tool profile for pi with auto, off, and force modes",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jellyfish-p/pi-claude-code.git"
@@ -30,15 +30,26 @@
   },
   "scripts": {
     "generate:claude-tools": "node scripts/generate-claude-tools.mjs",
-    "test": "node --experimental-strip-types --test test/translate.test.ts test/replace-all.test.ts test/release.test.ts test/background-bash.test.ts test/results.test.ts",
-    "prepublishOnly": "npm test"
+    "test": "node --experimental-strip-types --test \"test/*.test.ts\"",
+    "prepublishOnly": "npm test",
+    "test:integration": "node --experimental-strip-types --test test/integration.test.ts",
+    "capture": "node scripts/capture/capture.mjs",
+    "diff:catalog": "node scripts/catalog-diff.mjs",
+    "collect": "node scripts/collect.mjs",
+    "build:docs": "node scripts/build-docs.mjs"
   },
   "peerDependencies": {
-    "@earendil-works/pi-agent-core": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "typebox": "*"
+    "@earendil-works/pi-agent-core": ">=1.6.0 <1.7.0",
+    "@earendil-works/pi-coding-agent": ">=1.6.0 <1.7.0",
+    "typebox": ">=1.3.27 <1.4.0"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.6.1"
+  },
+  "dependencies": {
+    "minimatch": "11.0.9"
   }
 }

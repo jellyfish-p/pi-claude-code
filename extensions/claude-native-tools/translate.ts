@@ -4,6 +4,8 @@
  * unit-tested with plain Node.
  */
 
+import { createHash } from "node:crypto";
+
 export type ToolMode = "pi" | "claude";
 
 export const PI_TO_CLAUDE_TOOL: Readonly<Record<string, string>> = {
@@ -12,6 +14,7 @@ export const PI_TO_CLAUDE_TOOL: Readonly<Record<string, string>> = {
 	bash: "Bash",
 	edit: "Edit",
 	grep: "Grep",
+	find: "Glob",
 };
 
 export const CLAUDE_TO_PI_TOOL: Readonly<Record<string, string>> = {
@@ -20,6 +23,7 @@ export const CLAUDE_TO_PI_TOOL: Readonly<Record<string, string>> = {
 	Bash: "bash",
 	Edit: "edit",
 	Grep: "grep",
+	Glob: "find",
 };
 
 type JsonObject = Record<string, unknown>;
@@ -50,33 +54,41 @@ export function isClaudeModelId(modelId: string | undefined | null): boolean {
 	return typeof modelId === "string" && /claude/i.test(modelId);
 }
 
-export function mapToolName(name: string, mode: ToolMode): string {
-	if (mode === "claude") return PI_TO_CLAUDE_TOOL[name] ?? name;
+function modeForTool(name: string, mode: ToolMode, claudeAliases?: ReadonlySet<string>): ToolMode {
+	if (mode !== "claude" || claudeAliases === undefined) return mode;
+	const alias = PI_TO_CLAUDE_TOOL[name] ?? (CLAUDE_TO_PI_TOOL[name] ? name : undefined);
+	return alias !== undefined && !claudeAliases.has(alias) ? "pi" : "claude";
+}
+
+export function mapToolName(name: string, mode: ToolMode, claudeAliases?: ReadonlySet<string>): string {
+	if (modeForTool(name, mode, claudeAliases) === "claude") return PI_TO_CLAUDE_TOOL[name] ?? name;
 	return CLAUDE_TO_PI_TOOL[name] ?? name;
 }
 
-export function translateToolCallBlock(block: ToolCallBlock, mode: ToolMode): ToolCallBlock[] {
-	return mode === "claude" ? toClaudeCalls(block) : toPiCalls(block);
+export function translateToolCallBlock(block: ToolCallBlock, mode: ToolMode, claudeAliases?: ReadonlySet<string>): ToolCallBlock[] {
+	return modeForTool(block.name, mode, claudeAliases) === "claude" ? toClaudeCalls(block) : toPiCalls(block);
 }
 
 /**
  * Translate the complete conversation for the current model. System messages
  * and tool declarations are intentionally left to pi's active-tool state; this
- * function only rewrites assistant tool calls and their results.
+ * function only rewrites assistant tool calls and their results. When the host
+ * restricts aliases, pass the actual available Claude aliases so each tool's
+ * history follows its own declaration instead of the global model mode.
  */
-export function translateMessages(messages: MessageLike[], mode: ToolMode): MessageLike[] {
+export function translateMessages(messages: MessageLike[], mode: ToolMode, claudeAliases?: ReadonlySet<string>): MessageLike[] {
 	const result: MessageLike[] = [];
 	const splitIds = new Map<string, string[]>();
-	const backgroundBashIds = new Set<string>();
+	const translatedNames = new Map<string, string>();
 
 	for (const message of messages) {
 		if (message.role === "assistant") {
-			const translated = translateAssistantMessage(message, mode);
+			const translated = translateAssistantMessage(message, mode, claudeAliases);
 			result.push(translated.message);
 			for (const [oldId, newIds] of translated.splitIds) splitIds.set(oldId, newIds);
-			if (mode === "pi" && Array.isArray(translated.message.content)) {
+			if (Array.isArray(translated.message.content)) {
 				for (const block of translated.message.content) {
-					if (isToolCallBlock(block) && block.name === "Bash") backgroundBashIds.add(block.id);
+					if (isToolCallBlock(block)) translatedNames.set(block.id, block.name);
 				}
 			}
 			continue;
@@ -84,11 +96,8 @@ export function translateMessages(messages: MessageLike[], mode: ToolMode): Mess
 
 		if (message.role === "toolResult" && typeof message.toolCallId === "string") {
 			const ids = splitIds.get(message.toolCallId) ?? [message.toolCallId];
-			const toolName = typeof message.toolName === "string" && !backgroundBashIds.has(message.toolCallId)
-				? mapToolName(message.toolName, mode)
-				: message.toolName;
-
 			for (const id of ids) {
+				const toolName = translatedNames.get(id) ?? (typeof message.toolName === "string" ? mapToolName(message.toolName, mode, claudeAliases) : message.toolName);
 				if (ids.length === 1 && id === message.toolCallId && toolName === message.toolName) {
 					result.push(message);
 				} else {
@@ -113,7 +122,7 @@ export function translateMessages(messages: MessageLike[], mode: ToolMode): Mess
  * edits, it is expanded into multiple Claude `Edit` calls. The inverse
  * direction leaves every Claude `Edit` as a separate pi `edit` call.
  */
-export function translateAssistantMessage(message: MessageLike, mode: ToolMode): AssistantTranslation {
+export function translateAssistantMessage(message: MessageLike, mode: ToolMode, claudeAliases?: ReadonlySet<string>): AssistantTranslation {
 	if (message.role !== "assistant" || !Array.isArray(message.content)) {
 		return { message, changed: false, splitIds: new Map() };
 	}
@@ -128,7 +137,7 @@ export function translateAssistantMessage(message: MessageLike, mode: ToolMode):
 			continue;
 		}
 
-		const translated = translateToolCallBlock(block, mode);
+		const translated = translateToolCallBlock(block, mode, claudeAliases);
 		if (translated.length === 1 && sameToolCall(translated[0], block)) {
 			content.push(block);
 			continue;
@@ -150,7 +159,7 @@ function toClaudeCalls(block: ToolCallBlock): ToolCallBlock[] {
 
 	// Already canonical: leave the call byte-for-byte untouched. This is what
 	// makes repeated requests idempotent.
-	if (name === "Read" || name === "Write" || name === "Bash" || name === "Grep") return [block];
+	if (name === "Read" || name === "Write" || name === "Bash" || name === "Grep" || name === "Glob") return [block];
 	if (name === "Edit") {
 		return Array.isArray(args.edits) ? toClaudeEditCalls(block, args) : [block];
 	}
@@ -166,6 +175,10 @@ function toClaudeCalls(block: ToolCallBlock): ToolCallBlock[] {
 	if (name === "grep") {
 		return [withArgs(block, "Grep", toClaudeGrepArgs(args))];
 	}
+	if (name === "find") return [withArgs(block, "Glob", {
+		pattern: args.pattern,
+		...(typeof args.path === "string" ? { path: args.path } : {}),
+	})];
 	if (name === "edit") {
 		return toClaudeEditCalls(block, args);
 	}
@@ -179,12 +192,19 @@ function toPiCalls(block: ToolCallBlock): ToolCallBlock[] {
 
 	// Already pi-native: do not split a legitimate multi-edit call. In
 	// particular, `edits[]` must survive a normal pi-mode request untouched.
-	if (name === "read" || name === "write" || name === "bash" || name === "edit" || name === "grep") return [block];
+	if (name === "read" || name === "write" || name === "bash" || name === "edit" || name === "grep" || name === "find") return [block];
 	if (name === "Read") return [withArgs(block, "read", toPiReadArgs(args))];
 	if (name === "Write") return [withArgs(block, "write", toPiWriteArgs(args))];
 	// Keep background calls routed to the adapter, which owns the task lifecycle.
 	if (name === "Bash") return [args.run_in_background === true ? block : withArgs(block, "bash", toPiBashArgs(args))];
-	if (name === "Grep") return [withArgs(block, "grep", toPiGrepArgs(args))];
+	// Historical Claude-only search features have no faithful pi projection.
+	// Preserve the original call and pair its original result instead of silently
+	// widening asymmetric context or dropping count/multiline semantics.
+	if (name === "Grep") return [hasUnsupportedGrepArgs(args) ? block : withArgs(block, "grep", toPiGrepArgs(args))];
+	if (name === "Glob") return [withArgs(block, "find", {
+		pattern: args.pattern,
+		...(typeof args.path === "string" ? { path: args.path } : {}),
+	})];
 	if (name === "Edit") return toPiEditCalls(block, args);
 
 	return [{ ...block, name: mapToolName(name, "pi") }];
@@ -322,20 +342,21 @@ function toClaudeGrepArgs(args: JsonObject): JsonObject {
 
 function toPiGrepArgs(args: JsonObject): JsonObject {
 	const context = firstNumber(args.context, args["-C"]);
-	const asymmetricContext = Math.max(
-		typeof args["-A"] === "number" ? args["-A"] : 0,
-		typeof args["-B"] === "number" ? args["-B"] : 0,
-	);
-	const effectiveContext = context ?? (asymmetricContext > 0 ? asymmetricContext : undefined);
 
 	return {
 		pattern: args.pattern,
 		...(typeof args.path === "string" ? { path: args.path } : {}),
 		...(typeof args.glob === "string" ? { glob: args.glob } : {}),
 		...(args["-i"] === true ? { ignoreCase: true } : {}),
-		...(effectiveContext === undefined ? {} : { context: effectiveContext }),
+		...(context === undefined ? {} : { context }),
 		...(typeof args.head_limit === "number" ? { limit: args.head_limit } : {}),
 	};
+}
+
+function hasUnsupportedGrepArgs(args: JsonObject): boolean {
+	return args.output_mode === "count" || args["-A"] !== undefined || args["-B"] !== undefined
+		|| args["-o"] === true || typeof args.type === "string" || args.multiline === true
+		|| (typeof args.offset === "number" && args.offset !== 0);
 }
 
 function withArgs(block: ToolCallBlock, name: string, args: JsonObject): ToolCallBlock {
@@ -345,7 +366,9 @@ function withArgs(block: ToolCallBlock, name: string, args: JsonObject): ToolCal
 function splitToolCallId(id: string, index: number, total: number): string {
 	if (total <= 1) return id;
 	const suffix = `__edit_${index}`;
-	return `${id.slice(0, Math.max(1, 64 - suffix.length))}${suffix}`;
+	if (id.length + suffix.length <= 64) return `${id}${suffix}`;
+	const hash = createHash("sha256").update(id).digest("hex").slice(0, 16);
+	return `${id.slice(0, Math.max(1, 64 - suffix.length - hash.length - 1))}_${hash}${suffix}`;
 }
 
 function sameToolCall(a: ToolCallBlock, b: ToolCallBlock): boolean {

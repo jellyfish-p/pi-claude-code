@@ -1,11 +1,11 @@
 /**
  * Claude-native tool profile for pi.
  *
- * When the active model id contains `claude`, this extension exposes
- * `Read` / `Write` / `Bash` / `Edit` / `Grep` with Claude Code's native
- * descriptions and input schemas. Their implementations delegate to pi's
- * existing `read` / `write` / `bash` / `edit` / `grep` tools. Background Bash
- * calls additionally expose task controls and a completion notification.
+ * Auto mode matches Claude model IDs; flags and a command also allow off or
+ * force. Read/Write/Bash/Edit/Grep delegate to pi's existing tools. Glob has
+ * an independent filesystem backend for Claude Code's search semantics.
+ * Descriptions and schemas advertise only implemented adapter capabilities.
+ * Background Bash adds task controls and a completion notification.
  *
  * Conversation history is translated before every request: pi tool calls
  * become Claude calls for Claude models, and Claude calls become pi calls for
@@ -15,9 +15,8 @@
  */
 
 import { stat } from "node:fs/promises";
-import { homedir } from "node:os";
-import { relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { relative } from "node:path";
+import { VERSION } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type {
 	ExtensionAPI,
@@ -29,29 +28,18 @@ import type {
 import type { TSchema } from "typebox";
 import { BackgroundBashTasks, DEFAULT_BACKGROUND_TIMEOUT, MAX_BACKGROUND_TIMEOUT } from "./background-bash";
 import { CLAUDE_TOOL_CATALOG } from "./catalog";
+import { executeGlob } from "./glob.ts";
+import { resolveLocalPath } from "./paths.ts";
+import { PI_TO_CLAUDE, profileConfiguration, profileMode, toolProjection, ToolProfile, type ProfileSetting } from "./profile.ts";
 import { buildReplaceAllEdit } from "./replace-all";
 import { formatBashResult, formatEditResult, formatGrepResult, formatReadResult, formatWriteResult } from "./results";
 import {
-	isClaudeModelId,
 	translateMessages,
 	type ToolMode,
 } from "./translate";
 
-const PI_TO_CLAUDE: Readonly<Record<string, string>> = {
-	read: "Read",
-	write: "Write",
-	bash: "Bash",
-	edit: "Edit",
-	grep: "Grep",
-};
-
-const CLAUDE_TO_PI: Readonly<Record<string, string>> = {
-	Read: "read",
-	Write: "write",
-	Bash: "bash",
-	Edit: "edit",
-	Grep: "grep",
-};
+export const DEFAULT_FOREGROUND_TIMEOUT = 120_000;
+export const MAX_FOREGROUND_TIMEOUT = 600_000;
 
 const taskParameters = {
 	type: "object",
@@ -59,43 +47,6 @@ const taskParameters = {
 	required: ["task_id"],
 	additionalProperties: false,
 } as unknown as TSchema;
-
-function modeForModel(modelId: string | undefined): ToolMode {
-	return isClaudeModelId(modelId) ? "claude" : "pi";
-}
-
-function desiredTools(names: string[], mode: ToolMode, hasBashTasks: boolean): string[] {
-	const result: string[] = [];
-	const seen = new Set<string>();
-	const add = (name: string) => {
-		if (seen.has(name)) return;
-		seen.add(name);
-		result.push(name);
-	};
-
-	if (mode === "claude") {
-		// Keep the pi tools active but hide their declarations. They must stay
-		// callable because the Claude adapters delegate through executeTool().
-		for (const name of names) {
-			add(name);
-			if (PI_TO_CLAUDE[name]) add(PI_TO_CLAUDE[name]);
-			if (CLAUDE_TO_PI[name]) add(CLAUDE_TO_PI[name]);
-		}
-	} else {
-		for (const name of names) {
-			if (CLAUDE_TO_PI[name]) continue;
-			add(name);
-		}
-		for (const name of names) {
-			if (CLAUDE_TO_PI[name]) add(CLAUDE_TO_PI[name]);
-		}
-	}
-	if (hasBashTasks || seen.has("Bash")) {
-		add("TaskOutput");
-		add("TaskStop");
-	}
-	return result;
-}
 
 /**
  * Keep pi's original tools callable while hiding their declarations from the
@@ -130,7 +81,17 @@ function unwrap(outcome: Awaited<ReturnType<ExtensionToolContext["executeTool"]>
 
 export default function claudeNativeTools(pi: ExtensionAPI) {
 	let lastMode: ToolMode = "pi";
-	const bashTasks = new BackgroundBashTasks((task) => {
+	let settingOverride: ProfileSetting | undefined;
+	let profile = new ToolProfile();
+	let hostRestrictedAliases: string[] = [];
+	pi.registerFlag("claude-tools", { type: "string", default: "auto", description: "Claude tool profile: auto, off, or force." });
+	pi.registerFlag("claude-tools-model-pattern", { type: "string", description: "Case-insensitive model ID regular expression for auto mode (default: claude)." });
+	const configuration = () => profileConfiguration(settingOverride ?? pi.getFlag("claude-tools"), pi.getFlag("claude-tools-model-pattern"));
+	const modeForModel = (modelId: string | undefined) => {
+		const config = configuration();
+		return profileMode(config.setting, modelId, config.matcher);
+	};
+	const createBashTasks = () => new BackgroundBashTasks((task) => {
 		const exitCode = task.exit_code === undefined ? "" : ` with exit code ${task.exit_code}`;
 		pi.sendMessage({
 			customType: "claude-native-tools:background-bash",
@@ -139,16 +100,29 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 			details: task,
 		}, { triggerTurn: true, deliverAs: "followUp" });
 	});
+	let bashTasks = createBashTasks();
 
 	function syncToolProfile(ctx: ExtensionContext, modelId = ctx.model?.id): void {
 		const mode = modeForModel(modelId);
 		lastMode = mode;
 
 		const active = pi.getActiveTools();
-		if (active.length === 0) return;
-
-		const desired = desiredTools(active, mode, bashTasks.hasTasks);
+		const desired = profile.sync(active, mode, bashTasks.hasTasks);
 		if (!sameNames(active, desired)) pi.setActiveTools(desired);
+		const applied = pi.getActiveTools();
+		const restricted = Object.entries(PI_TO_CLAUDE)
+			.filter(([native, alias]) => desired.includes(alias) && (!applied.includes(native) || !applied.includes(alias)))
+			.map(([, alias]) => alias);
+		hostRestrictedAliases = [...new Set([...hostRestrictedAliases, ...restricted])];
+		// A strict pi --tools allowlist may admit the alias but exclude the
+		// backend. Never advertise an adapter that cannot execute its work.
+		const orphaned = new Set(Object.entries(PI_TO_CLAUDE)
+			.filter(([native, alias]) => applied.includes(alias) && !applied.includes(native))
+			.map(([, alias]) => alias));
+		const runnable = applied.filter((name) => !orphaned.has(name)
+			&& (name !== "TaskOutput" && name !== "TaskStop" || bashTasks.hasTasks || applied.includes("bash")));
+		if (!sameNames(applied, runnable)) pi.setActiveTools(runnable);
+		profile.accept(pi.getActiveTools());
 	}
 
 	function modeForContext(ctx: ExtensionContext): ToolMode {
@@ -156,6 +130,10 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", (_event, ctx) => {
+		profile = new ToolProfile();
+		hostRestrictedAliases = [];
+		bashTasks.close();
+		bashTasks = createBashTasks();
 		syncToolProfile(ctx);
 	});
 	pi.on("session_shutdown", () => bashTasks.close());
@@ -164,23 +142,48 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 		syncToolProfile(ctx, event.model.id);
 	});
 
-	pi.on("before_agent_start", (event, ctx) => {
-		// `selectedTools` is the active set pi is about to render. It is the
-		// most reliable source if the session was created before this extension
-		// had a chance to inspect the model.
-		const selected = event.systemPromptOptions.selectedTools;
-		if (pi.getActiveTools().length === 0 && selected && selected.length > 0) {
-			const mode = modeForModel(ctx.model?.id);
-			lastMode = mode;
-			pi.setActiveTools(desiredTools([...selected], mode, bashTasks.hasTasks));
-			return;
-		}
+	pi.on("before_agent_start", (_event, ctx) => {
 		syncToolProfile(ctx);
+	});
+
+	pi.registerCommand("claude-tools", {
+		description: "Show Claude tool diagnostics, or set auto/off/force for this loaded session.",
+		async handler(args, ctx) {
+			const action = args.trim() || "status";
+			if (action !== "status" && action !== "auto" && action !== "off" && action !== "force") {
+				ctx.ui.notify("Usage: /claude-tools [status|auto|off|force]", "error");
+				return;
+			}
+			if (action !== "status") {
+				await ctx.waitForIdle();
+				settingOverride = action;
+				syncToolProfile(ctx);
+			}
+			const config = configuration();
+			const active = pi.getActiveTools();
+			const projection = toolProjection(modeForContext(ctx), active);
+			const registered = pi.getAllTools().map((tool) => tool.name);
+			const duplicates = registered.filter((name, index) => registered.indexOf(name) !== index);
+			const missing = [...Object.values(PI_TO_CLAUDE), "TaskOutput", "TaskStop"].filter((name) => !registered.includes(name));
+			const filteredAliases = [...new Set([...hostRestrictedAliases, ...Object.entries(PI_TO_CLAUDE).filter(([native, alias]) => modeForContext(ctx) === "claude" && active.includes(native) && !active.includes(alias)).map(([, alias]) => alias)])];
+			const declared = active.filter((name) => !(name in PI_TO_CLAUDE && active.includes(PI_TO_CLAUDE[name as keyof typeof PI_TO_CLAUDE])));
+			ctx.ui.notify([
+				`pi ${VERSION}; Claude tool profile: ${config.setting}; selected: ${modeForContext(ctx)}; effective: ${projection.effective}.`,
+				`Active/callable: ${active.join(", ") || "(none)"}`,
+				`Declared by this profile: ${declared.join(", ") || "(none)"}`,
+				`History projection: Claude aliases ${[...projection.claudeAliases].join(", ") || "(none)"}; native tools ${projection.nativeTools.join(", ") || "(none)"}.`,
+				`Host-restricted aliases: ${filteredAliases.join(", ") || "(none)"}. pi tool allowlists can keep the native tool active while filtering its alias.`,
+				`Conflicts: ${duplicates.length > 0 ? `duplicate names ${[...new Set(duplicates)].join(", ")}` : missing.length > 0 ? `missing adapter tools ${missing.join(", ")}` : "none visible in pi's configured tools; loader errors remain authoritative"}.`,
+				"Unsupported: Grep count/type/offset/multiline/-o/-A/-B; Read PDF pages/allow_large; Bash sandbox override. Grep file lists share pi's content truncation budget. TaskOutput/TaskStop are adapter task controls. Glob does not follow directory symlinks.",
+				...config.issues,
+			].join("\n"), config.issues.length || duplicates.length || missing.length ? "warning" : "info");
+		},
 	});
 
 	pi.on("context", (event, ctx) => {
 		const mode = modeForContext(ctx);
-		const messages = translateMessages(event.messages as never, mode);
+		const projection = toolProjection(mode, pi.getActiveTools());
+		const messages = translateMessages(event.messages as never, mode, projection.claudeAliases);
 		return { messages: messages as AgentMessage[] };
 	});
 
@@ -247,9 +250,10 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 		annotations: { destructiveHint: true, openWorldHint: true },
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const input = params as Record<string, unknown>;
+			if (input.dangerouslyDisableSandbox !== undefined) return errorResult("Bash: sandbox override is not supported by this adapter.");
+			if (typeof input.command !== "string") return errorResult("Bash: command must be a string.");
 			if (input.run_in_background === true) {
 				if (signal?.aborted) return errorResult("Bash: the call was cancelled.");
-				if (typeof input.command !== "string") return errorResult("Bash: command must be a string.");
 				const timeout = input.timeout ?? DEFAULT_BACKGROUND_TIMEOUT;
 				if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0 || timeout > MAX_BACKGROUND_TIMEOUT) {
 					return errorResult(`Bash: background timeout must be greater than 0 and at most ${MAX_BACKGROUND_TIMEOUT} ms.`);
@@ -257,11 +261,12 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 				return bashTasks.start(input.command, timeout, ctx.executeTool);
 			}
 
-			const args: Record<string, unknown> = { command: input.command };
-			if (typeof input.timeout === "number" && input.timeout > 0) {
-				// Claude Code expresses Bash timeouts in milliseconds; pi uses seconds.
-				args.timeout = input.timeout / 1000;
+			const timeout = input.timeout ?? DEFAULT_FOREGROUND_TIMEOUT;
+			if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0 || timeout > MAX_FOREGROUND_TIMEOUT) {
+				return errorResult(`Bash: foreground timeout must be greater than 0 and at most ${MAX_FOREGROUND_TIMEOUT} ms.`);
 			}
+			// Claude Code expresses Bash timeouts in milliseconds; pi uses seconds.
+			const args = { command: input.command, timeout: timeout / 1000 };
 			return formatBashResult(unwrap(await ctx.executeTool("bash", args, { signal, onUpdate })));
 		},
 	});
@@ -351,6 +356,8 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 			if (typeof input.type === "string") unsupported.push("type");
 			if (typeof input.offset === "number" && input.offset !== 0) unsupported.push("offset");
 			if (input.multiline === true) unsupported.push("multiline");
+			if (input["-A"] !== undefined) unsupported.push("-A");
+			if (input["-B"] !== undefined) unsupported.push("-B");
 			if (unsupported.length > 0) {
 				return errorResult(`Grep: pi's grep tool does not support ${unsupported.join(", ")} yet.`);
 			}
@@ -359,8 +366,7 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 			const limit = Math.floor(firstNumber(input.head_limit) ?? 250);
 			const outputLimit = limit > 0 ? limit : Number.MAX_SAFE_INTEGER;
 			const context = firstNumber(input.context, input["-C"]);
-			const asymmetric = Math.max(firstNumber(input["-A"]) ?? 0, firstNumber(input["-B"]) ?? 0);
-			const contextLines = mode === "content" ? context ?? asymmetric : 0;
+			const contextLines = mode === "content" ? context ?? 0 : 0;
 			const args: Record<string, unknown> = { pattern: input.pattern };
 			if (typeof input.path === "string") args.path = input.path;
 			if (typeof input.glob === "string") args.glob = input.glob;
@@ -380,20 +386,20 @@ export default function claudeNativeTools(pi: ExtensionAPI) {
 			});
 		},
 	});
-}
 
-function resolveLocalPath(cwd: string, input: string): string {
-	const path = input.replace(/^@/, "");
-	if (path.startsWith("file://")) {
-		try {
-			return fileURLToPath(path);
-		} catch {
-			return resolve(cwd, path);
-		}
-	}
-	if (path === "~") return homedir();
-	if (/^~[/\\]/.test(path)) return resolve(homedir(), path.slice(2));
-	return resolve(cwd, path);
+	pi.registerTool({
+		name: "Glob",
+		label: "Glob",
+		description: CLAUDE_TOOL_CATALOG.Glob.description,
+		promptSnippet: "Find files by glob pattern, including hidden and gitignored files",
+		parameters: CLAUDE_TOOL_CATALOG.Glob.input_schema as unknown as TSchema,
+		defaultActive: false,
+		prepareLoadout: hidePiAliases,
+		annotations: { readOnlyHint: true },
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			return executeGlob(ctx.cwd, params as Record<string, unknown>, signal);
+		},
+	});
 }
 
 async function inspectPath(path: string) {

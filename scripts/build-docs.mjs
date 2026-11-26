@@ -4,9 +4,13 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import url from 'node:url'
+import { parseArgs } from './capture/common.mjs'
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..')
-const DOCS = path.join(ROOT, 'docs')
+const args = parseArgs(process.argv.slice(2), { values: ['docs', 'version'], flags: ['help'] })
+if (args.help) { console.log('Usage: node scripts/build-docs.mjs [--docs docs] [--version VERSION]'); process.exit(0) }
+if (args._.length) throw new Error('Unexpected positional argument')
+const DOCS = path.resolve(args.docs || path.join(ROOT, 'docs'))
 const DATA = path.join(DOCS, 'data')
 
 const readJSON = (p) => JSON.parse(fs.readFileSync(p, 'utf8'))
@@ -19,6 +23,7 @@ const write = (name, body) => {
 const BT = String.fromCharCode(96)
 const code = (x) => BT + x + BT
 const fence = (lang, body) => {
+  body = String(body ?? '')
   // pick a fence longer than any backtick run inside the body (system prompts contain ``` blocks)
   const runs = body.match(/`{3,}/g)
   const n = Math.max(3, runs ? Math.max(...runs.map((x) => x.length)) + 1 : 0)
@@ -27,20 +32,25 @@ const fence = (lang, body) => {
 }
 const lines = (...xs) => xs.flat().filter((x) => x !== null && x !== undefined).join('\n')
 
-const VERSION = '2.1.316'
+const manifest = fs.existsSync(path.join(DATA, 'manifest.json')) ? readJSON(path.join(DATA, 'manifest.json')) : null
 const tools = readJSON(path.join(DATA, 'tools.json'))
 const system = readJSON(path.join(DATA, 'system-prompt.json'))
 const envBlock = read(path.join(DATA, 'environment-block.md'))
-const init = readJSON(path.join(DATA, 'init.json'))
+const init = fs.existsSync(path.join(DATA, 'init.json')) ? readJSON(path.join(DATA, 'init.json')) : { tools: tools.map((tool) => tool.name), agents: [], skills: [], slash_commands: [] }
+const VERSION = args.version || manifest?.claudeCodeVersion || init.version || system.map((block) => block.text || '').join('\n').match(/cc_version=(\d+\.\d+\.\d+)/)?.[1] || 'unknown (legacy snapshot)'
 const envelope = readJSON(path.join(DATA, 'request-envelope.json'))
-const agentFiles = fs.readdirSync(path.join(DATA, 'agents')).filter((f) => f.endsWith('.md')).sort()
-const skillFiles = fs.readdirSync(path.join(DOCS, 'skills')).filter((f) => f.endsWith('.md')).sort()
+const ownership = fs.existsSync(path.join(DATA, '.collect-manifest.json')) ? readJSON(path.join(DATA, '.collect-manifest.json')) : null
+const generatedFiles = ownership ? new Set(Object.keys(ownership.files || {})) : null
+const agentFiles = fs.existsSync(path.join(DATA, 'agents')) ? fs.readdirSync(path.join(DATA, 'agents')).filter((f) => f.endsWith('.md') && (!generatedFiles || generatedFiles.has('data/agents/' + f))).sort() : []
+const skillFiles = fs.existsSync(path.join(DOCS, 'skills')) ? fs.readdirSync(path.join(DOCS, 'skills')).filter((f) => f.endsWith('.md') && (!generatedFiles || generatedFiles.has('skills/' + f))).sort() : []
+const CONTEXT = manifest ? `\n> 快照平台 ${code(manifest.platform)} · 入口 ${code(manifest.entry)} · 状态 ${code(manifest.status)} · 生成时间 ${code(manifest.generatedAt)}；仅代表此快照配置。\n` : ''
 
 const header = (title, note) =>
   lines(
     '# ' + title,
     '',
     '> Claude Code ' + code(VERSION) + ' · 由 ' + code('scripts/build-docs.mjs') + ' 自动生成 · 请勿手改',
+    CONTEXT,
     note ? '\n' + note.trim() : '',
     '',
     '---',
@@ -286,7 +296,7 @@ system prompt 与工具白名单。
 
 /* ------------------------------------------------------------------ 07 */
 {
-  const it = init.tools
+  const it = init.tools || []
   const out = lines(
     '## tools（' + it.length + '）',
     '',
@@ -294,21 +304,21 @@ system prompt 与工具白名单。
     '',
     '> 注意：API 请求里实际叫 `Agent`，init 里叫 `Task`（旧名保留）。',
     '',
-    '## agents（' + init.agents.length + '）',
+    '## agents（' + (init.agents || []).length + '）',
     '',
-    init.agents.map((a) => code(a)).join('、'),
+    (init.agents || []).map((a) => code(a)).join('、'),
     '',
     '## plugins',
     '',
     (init.plugins || []).map((p) => '- ' + code(p.name) + ' — path: `' + p.path + '`, source: `' + p.source + '`').join('\n'),
     '',
-    '## skills（' + init.skills.length + '）',
+    '## skills（' + (init.skills || []).length + '）',
     '',
-    init.skills.map((s) => code(s)).join('、'),
+    (init.skills || []).map((s) => code(s)).join('、'),
     '',
-    '## slash_commands（' + init.slash_commands.length + '）',
+    '## slash_commands（' + (init.slash_commands || []).length + '）',
     '',
-    init.slash_commands.map((s) => code('/' + s)).join('、'),
+    (init.slash_commands || []).map((s) => code('/' + s)).join('、'),
     '',
     '## capabilities',
     '',
@@ -351,7 +361,7 @@ system prompt 与工具白名单。
     'Task', 'TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskGet', 'TaskList', 'TaskStop',
     'Skill', 'REPL', 'JavaScript', 'AskUserQuestion', 'ToolSearch', 'SendUserMessage',
   ]
-  const enabled = new Set(init.tools.map((t) => (t === 'Task' ? 'Agent' : t)))
+  const enabled = new Set((init.tools || []).map((t) => (t === 'Task' ? 'Agent' : t)))
   const gated = builtin.filter((n) => !enabled.has(n) && n !== 'Task')
   const rows = builtin
     .map((n) => '| ' + code(n) + ' | ' + (enabled.has(n) ? '✅ 本次发送' : '❌ 未启用') + ' |')
@@ -363,7 +373,7 @@ system prompt 与工具白名单。
       '未加载的内置工具 / 历史工具',
       `
 \`BUILTIN_TOOL_NAMES\` 是二进制里那份"内置工具名单"（用于 \`Tool(pattern)\` 权限规则校验），
-共 ${builtin.length} 个名字。它和本次会话实际启用的 ${init.tools.length} 个工具（见 07）**并不重合**：
+共 ${builtin.length} 个名字。它和本次会话实际启用的 ${(init.tools || []).length} 个工具（见 07）**并不重合**：
 
 - 会话里有、名单里没有：\`CronCreate\` \`CronDelete\` \`CronList\` \`EnterWorktree\` \`ExitWorktree\`
   \`Monitor\` \`SendMessage\` \`ListAgents\` \`ReportFindings\` \`ScheduleWakeup\` \`Workflow\`
@@ -389,7 +399,7 @@ ${rows}
 间隙）得到，以 \`</example>\` 结尾，因此可确认没有被截断。pi 想实现 Claude Code 风格的
 todo 工具时，这份文本最接近参考。
 
-${fence('text', read(path.join(DATA, 'gated-todowrite.md')).trimEnd())}
+${fence('text', fs.existsSync(path.join(DATA, 'gated-todowrite.md')) ? read(path.join(DATA, 'gated-todowrite.md')).trimEnd() : '此快照未提供二进制静态提取的 TodoWrite 描述。')}
 `
     )
   )
@@ -446,7 +456,7 @@ ${fence('text', read(path.join(DATA, 'gated-todowrite.md')).trimEnd())}
     '',
     '- `--permission-mode plan` 时会额外加顶层 `safeguards`（classifier 上下文：cwd、rules、git 状态、',
     '  trusted_directories…），见 `data/` 下的抓包。',
-    '- `system[0]` 里 `cc_version=2.1.316.8dc` 的 `.8dc` 是每次构建都不同的指纹后缀。',
+    '- `system[0]` 的 `cc_version` 可能带构建指纹后缀，应与 manifest 的版本和平台一起解读。',
     ''
   )
   write('06-api-request-shape.md', body)

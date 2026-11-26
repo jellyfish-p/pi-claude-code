@@ -19,9 +19,29 @@ concurrency:
 
 jobs:
   package:
-    name: Test and pack
-    runs-on: ubuntu-24.04
+    name: ${{ matrix.os }} / Node ${{ matrix.node }} / pi ${{ matrix.pi }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            node: "22.19.0"
+            pi: "1.6.0"
+          - os: windows-latest
+            node: "22.19.0"
+            pi: "1.6.0"
+          - os: ubuntu-24.04
+            node: "24.x"
+            pi: "1.6.1"
+            release: true
+          - os: windows-latest
+            node: "24.x"
+            pi: "1.6.1"
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout
@@ -32,7 +52,25 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: "22.x"
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Select the verified pi compatibility version
+        if: matrix.pi != '1.6.1'
+        run: npm install --no-save --package-lock=false @earendil-works/pi-coding-agent@${{ matrix.pi }} @earendil-works/pi-agent-core@${{ matrix.pi }}
+
+      - name: Verify selected runtime
+        env:
+          EXPECTED_PI: ${{ matrix.pi }}
+        run: node --input-type=module -e 'import assert from "node:assert/strict"; import { VERSION } from "@earendil-works/pi-coding-agent"; assert.equal(VERSION, process.env.EXPECTED_PI); console.log(`Testing pi ${VERSION} on ${process.version}`);'
+
+      - name: Check generated catalog
+        run: |
+          npm run generate:claude-tools
+          git diff --exit-code -- extensions/claude-native-tools/catalog.ts
 
       - name: Validate release metadata
         if: startsWith(github.ref, 'refs/tags/v')
@@ -76,6 +114,7 @@ jobs:
           tar -tzf "$TARBALL"
 
       - name: Upload npm package
+        if: matrix.release
         uses: actions/upload-artifact@v7
         with:
           name: pi-claude-native-tools
